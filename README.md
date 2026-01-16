@@ -20,6 +20,7 @@ python server.py
 ```
 
 서버는 `http://localhost:7860`에서 실행됩니다.
+서버는 `http://localhost:7860/video`에서 웹캠을 출력합니다.
 
 ### 2. 클라이언트 실행
 
