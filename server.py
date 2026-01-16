@@ -1,14 +1,18 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 from fastrtc import Stream
 import cv2
 import numpy as np
 import uvicorn
 import time
 import asyncio
+import threading
 
 # 프레임 수신 통계
 frame_count = 0
 last_log_time = time.time()
+latest_frame = None
+latest_frame_lock = threading.Lock()
 
 # 서버에서 클라이언트로부터 받은 영상을 처리하는 함수
 def process_received_frame(frame: np.ndarray):
@@ -55,6 +59,9 @@ def process_received_frame(frame: np.ndarray):
     # 여기에 추가 영상 처리 로직을 추가할 수 있습니다
     # 예: 객체 감지, 필터 적용 등
     
+    global latest_frame
+    with latest_frame_lock:
+        latest_frame = frame.copy()
     return frame
 
 # FastAPI 앱 생성
@@ -120,8 +127,32 @@ async def root():
     return {
         "status": "running",
         "message": "FastRTC WebRTC 서버가 실행 중입니다",
-        "webrtc_endpoint": "/webrtc/offer"
+        "webrtc_endpoint": "/webrtc/offer",
+        "mjpeg_preview": "/video"
     }
+
+# 브라우저용 MJPEG 스트림 엔드포인트
+@app.get("/video")
+def video_feed():
+    def generate():
+        while True:
+            with latest_frame_lock:
+                frame = None if latest_frame is None else latest_frame.copy()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            ok, buffer = cv2.imencode(".jpg", frame)
+            if not ok:
+                continue
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
+            )
+            time.sleep(0.03)
+
+    return StreamingResponse(
+        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 # FastAPI 서버 실행
 if __name__ == "__main__":
