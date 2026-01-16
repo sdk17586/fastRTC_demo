@@ -1,0 +1,8 @@
+fastrtc
+opencv-python
+numpy
+uvicorn
+fastapi
+aiortc
+aiohttp
+
