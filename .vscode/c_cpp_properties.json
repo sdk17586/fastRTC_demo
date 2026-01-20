@@ -3,15 +3,32 @@
     {
       "name": "linux-gcc-x64",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
+        "/usr/include/gstreamer-1.0",
+        "/usr/include/glib-2.0",
+        "/usr/lib/x86_64-linux-gnu/glib-2.0/include",
+        "/usr/include/sysprof-6",
+        "/usr/include/orc-0.4",
+        "/usr/include/libmount",
+        "/usr/include/blkid",
+        "/usr/include/libsoup-3.0",
+        "/usr/include/mit-krb5",
+        "/usr/include/json-glib-1.0"
       ],
-      "compilerPath": "/usr/bin/gcc",
+      "compilerPath": "/usr/bin/g++",
       "cStandard": "${default}",
-      "cppStandard": "${default}",
+      "cppStandard": "c++17",
       "intelliSenseMode": "linux-gcc-x64",
       "compilerArgs": [
-        ""
-      ]
+        "-DGST_USE_UNSTABLE_API",
+        "-pthread"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}/**"
+        ],
+        "limitSymbolsToIncludedHeaders": false
+      }
     }
   ],
   "version": 4

@@ -330,19 +330,28 @@ static void on_incoming_decodebin_stream(GstElement * /* decodebin */, GstPad *p
     gst_caps_unref(caps);
 }
 
+// WebRTC 연결 후 원격 스트림(서버로부터의 비디오/오디오)이 도착할 때 호출됨
+// webrtcbin이 소스 패드를 생성하면 이 함수가 호출되어 패드를 decodebin에 연결함
+// 이 연결이 없으면 "not-linked" 에러가 발생하여 파이프라인이 실패함
 static void on_incoming_stream(GstElement *webrtc, GstPad *pad, GstElement *pipe) {
+    // 소스 패드(src)만 처리 (webrtcbin에서 나오는 패드)
     if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC) {
         return;
     }
+    // 원격 스트림을 디코딩하기 위한 decodebin 생성
     GstElement *decodebin = gst_element_factory_make("decodebin", nullptr);
     if (!decodebin) {
         g_printerr("[client] Failed to create decodebin for incoming stream\n");
         return;
     }
+    // decodebin이 디코딩된 스트림 패드를 생성할 때 처리할 콜백 연결
     g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_incoming_decodebin_stream), pipe);
+    // decodebin을 파이프라인에 추가
     gst_bin_add(GST_BIN(pipe), decodebin);
     gst_element_sync_state_with_parent(decodebin);
 
+    // webrtcbin의 소스 패드를 decodebin의 싱크 패드에 연결
+    // 이 연결이 핵심: 연결되지 않으면 데이터가 흐를 곳이 없어 에러 발생
     GstPad *sinkpad = gst_element_get_static_pad(decodebin, "sink");
     gst_pad_link(pad, sinkpad);
     gst_object_unref(sinkpad);
@@ -450,13 +459,31 @@ int main(int argc, char **argv) {
                  // "sdp-semantic" 속성은 GstWebRTCBin에 존재하지 않음 (제거)
                  "rtcp-mux-policy", "require",
                  nullptr);
-
+    
+    // WebRTC 협상이 필요할 때 호출되는 콜백 연결 (SDP offer/answer 교환 시작)
     g_signal_connect(app.webrtcbin, "on-negotiation-needed", G_CALLBACK(on_negotiation_needed), &app);
+    // ICE 후보(candidate)가 수집될 때 호출되는 콜백 연결 (네트워크 연결 정보 전송)
     g_signal_connect(app.webrtcbin, "on-ice-candidate", G_CALLBACK(on_ice_candidate), &app);
+    // ICE 수집 상태 변경 시 호출되는 콜백 연결 (gathering, complete 등 상태 모니터링)
     g_signal_connect(app.webrtcbin, "notify::ice-gathering-state", G_CALLBACK(on_webrtc_state_changed), &app);
+    // ICE 연결 상태 변경 시 호출되는 콜백 연결 (new, checking, connected, failed 등 상태 모니터링)
     g_signal_connect(app.webrtcbin, "notify::ice-connection-state", G_CALLBACK(on_webrtc_state_changed), &app);
+    // 시그널링 상태 변경 시 호출되는 콜백 연결 (stable, have-local-offer, have-remote-offer 등 상태 모니터링)
     g_signal_connect(app.webrtcbin, "notify::signaling-state", G_CALLBACK(on_webrtc_state_changed), &app);
+    // 피어 연결 상태 변경 시 호출되는 콜백 연결 (new, connecting, connected, disconnected 등 상태 모니터링)
     g_signal_connect(app.webrtcbin, "notify::connection-state", G_CALLBACK(on_webrtc_state_changed), &app);
+    // 원격 스트림이 추가될 때 호출되는 콜백 연결 (상대방으로부터 미디어 스트림 수신 시 처리)
+    // [필수] 이 콜백이 없으면 webrtcbin의 소스 패드가 연결되지 않아 "not-linked" 에러 발생
+    // 
+    // 주의: 클라이언트가 서버로만 송신하더라도 이 콜백은 필수입니다.
+    // 이유:
+    // 1. WebRTC는 양방향 연결을 설정하므로, 서버의 SDP answer에 수신 경로가 포함될 수 있음
+    // 2. RTCP 패킷(통계/제어)은 양방향으로 교환되며, 이로 인해 소스 패드가 생성될 수 있음
+    // 3. 서버가 미디어 스트림을 보내지 않더라도, WebRTC 프로토콜 특성상 일부 패드가 생성될 수 있음
+    // 4. 패드가 생성되었는데 연결되지 않으면 "not-linked" 에러로 파이프라인이 실패함
+    // 
+    // 따라서 서버가 스트림을 보내지 않는 경우에도 이 콜백을 등록해야 합니다.
+    // (콜백이 호출되지 않을 수 있지만, 호출될 경우를 대비해 반드시 등록 필요)
     g_signal_connect(app.webrtcbin, "pad-added", G_CALLBACK(on_incoming_stream), app.pipeline);
 
     gst_element_set_state(app.pipeline, GST_STATE_READY);
