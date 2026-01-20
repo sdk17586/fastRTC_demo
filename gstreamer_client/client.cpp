@@ -1,7 +1,7 @@
 #include <gst/gst.h>
 #include <gst/sdp/sdp.h>
 
-#define GST_USE_UNSTABLE_API
+// GST_USE_UNSTABLE_API는 Makefile에서 이미 정의됨
 #include <gst/webrtc/webrtc.h>
 
 #include <json-glib/json-glib.h>
@@ -313,7 +313,7 @@ static void handle_media_stream(GstPad *pad, GstElement *pipe, const char *conve
     gst_object_unref(qpad);
 }
 
-static void on_incoming_decodebin_stream(GstElement *decodebin, GstPad *pad, GstElement *pipe) {
+static void on_incoming_decodebin_stream(GstElement * /* decodebin */, GstPad *pad, GstElement *pipe) {
     if (!gst_pad_has_current_caps(pad)) {
         g_printerr("[client] Incoming pad has no caps, ignoring\n");
         return;
@@ -447,7 +447,7 @@ int main(int argc, char **argv) {
     g_object_set(app.webrtcbin,
                  "stun-server", STUN_SERVER,
                  "bundle-policy", GST_WEBRTC_BUNDLE_POLICY_MAX_BUNDLE,
-                 "sdp-semantic", "unified-plan",
+                 // "sdp-semantic" 속성은 GstWebRTCBin에 존재하지 않음 (제거)
                  "rtcp-mux-policy", "require",
                  nullptr);
 
