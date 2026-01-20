@@ -16,8 +16,12 @@ from fastapi.responses import StreamingResponse
 from fastrtc import Stream
 
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
-logging.getLogger("aioice").setLevel(logging.DEBUG)
+# RTP 패킷 로그를 줄이기 위해 INFO 레벨로 설정
+logging.getLogger("aiortc").setLevel(logging.INFO)
+logging.getLogger("aioice").setLevel(logging.INFO)
+# RTP 패킷 관련 로거는 WARNING 레벨로 설정하여 출력 억제
+logging.getLogger("aiortc.rtcrtpsender").setLevel(logging.WARNING)
+logging.getLogger("aiortc.rtcrtpreceiver").setLevel(logging.WARNING)
 
 
 class FastRTCServer:
@@ -81,19 +85,22 @@ class FastRTCServer:
 
     def _log_frame_stats(self, frame: np.ndarray, current_time: float) -> None:
         if self.frame_count == 1:
-            self._log(
-                f"✅ 첫 프레임 수신! 프레임 크기: {frame.shape}, "
+            # 캐리지 리턴으로 같은 줄에 덮어쓰기
+            message = (
+                f"[서버] ✅ 첫 프레임 수신! 프레임 크기: {frame.shape}, "
                 f"데이터 타입: {frame.dtype}"
             )
+            print(f"\r{message:<100}", end="", flush=True)
             self.last_log_time = current_time
 
         if current_time - self.last_log_time >= 1.0:
             fps = self.frame_count / (current_time - self.last_log_time)
-            self._log(
-                f"프레임 수신 중... 총 {self.frame_count}개 프레임 수신, "
-                f"FPS: {fps:.2f}"
+            # 캐리지 리턴으로 같은 줄에 덮어쓰기
+            message = (
+                f"[서버] 프레임 수신 중... 총 {self.frame_count}개 프레임 수신, "
+                f"FPS: {fps:.2f}, 크기: {frame.shape}, 타입: {frame.dtype}"
             )
-            self._log(f"프레임 크기: {frame.shape}, 데이터 타입: {frame.dtype}")
+            print(f"\r{message:<100}", end="", flush=True)
             self.frame_count = 0
             self.last_log_time = current_time
 
@@ -101,13 +108,8 @@ class FastRTCServer:
         """
         클라이언트로부터 받은 영상 프레임을 처리합니다.
         """
-        self._log(
-            "🔵 Handler 호출됨! 프레임 크기: "
-            f"{frame.shape if frame is not None else 'None'}"
-        )
-
         if frame is None:
-            self._log("⚠️ 프레임이 None입니다!")
+            print("\r[서버] ⚠️ 프레임이 None입니다!", flush=True)
             return None
 
         self.frame_count += 1
