@@ -8,6 +8,7 @@
 #include <libsoup/soup.h>
 
 #include <cstring>
+#include <iostream>
 
 #define STUN_SERVER "stun://stun.l.google.com:19302"
 
@@ -143,6 +144,183 @@ static void flush_pending_ice(AppState *app) {
     }
 }
 
+static void print_sdp_details(const gchar *title, const gchar *sdp_text) {
+    g_print("\n--- %s SDP Details ---\n", title);
+    
+    if (!sdp_text) {
+        g_print("SDP text is null\n");
+        g_print("--- End of %s SDP Details ---\n\n", title);
+        return;
+    }
+    
+    // Parse SDP text line by line
+    const gchar *line_start = sdp_text;
+    guint media_index = 0;
+    gboolean in_media = FALSE;
+    
+    while (*line_start) {
+        const gchar *line_end = line_start;
+        while (*line_end && *line_end != '\r' && *line_end != '\n') {
+            line_end++;
+        }
+        
+        if (line_end > line_start && *line_start == '=' && line_start + 1 < line_end) {
+            gchar type = *(line_start + 1);
+            gchar *line = g_strndup(line_start + 2, line_end - line_start - 2);
+            
+            switch (type) {
+                case 'v':
+                    g_print("Version: %s\n", line);
+                    break;
+                case 'o':
+                    {
+                        gchar **parts = g_strsplit(line, " ", 6);
+                        if (g_strv_length(parts) >= 6) {
+                            g_print("Origin: username=%s, sess-id=%s, sess-version=%s, nettype=%s, addrtype=%s, address=%s\n",
+                                    parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+                        } else {
+                            g_print("Origin: %s\n", line);
+                        }
+                        g_strfreev(parts);
+                    }
+                    break;
+                case 's':
+                    g_print("Session Name: %s\n", line);
+                    break;
+                case 'i':
+                    g_print("Session Info: %s\n", line);
+                    break;
+                case 'u':
+                    g_print("URI: %s\n", line);
+                    break;
+                case 'e':
+                    g_print("Email: %s\n", line);
+                    break;
+                case 'p':
+                    g_print("Phone: %s\n", line);
+                    break;
+                case 'c':
+                    {
+                        gchar **parts = g_strsplit(line, " ", 3);
+                        if (g_strv_length(parts) >= 3) {
+                            g_print("Connection: nettype=%s, addrtype=%s, address=%s\n",
+                                    parts[0], parts[1], parts[2]);
+                        } else {
+                            g_print("Connection: %s\n", line);
+                        }
+                        g_strfreev(parts);
+                    }
+                    break;
+                case 't':
+                    {
+                        gchar **parts = g_strsplit(line, " ", 2);
+                        if (g_strv_length(parts) >= 2) {
+                            g_print("Timing: start=%s, stop=%s\n", parts[0], parts[1]);
+                        }
+                        g_strfreev(parts);
+                    }
+                    break;
+                case 'm':
+                    {
+                        in_media = TRUE;
+                        gchar **parts = g_strsplit(line, " ", 4);
+                        if (g_strv_length(parts) >= 3) {
+                            g_print("\n  Media #%u:\n", media_index++);
+                            g_print("    Type: %s\n", parts[0]);
+                            g_print("    Port: %s\n", parts[1]);
+                            g_print("    Protocol: %s\n", parts[2]);
+                            if (g_strv_length(parts) >= 4 && parts[3]) {
+                                g_print("    Formats: %s\n", parts[3]);
+                            }
+                        }
+                        g_strfreev(parts);
+                    }
+                    break;
+                case 'a':
+                    {
+                        gchar *attr = line;
+                        gchar *colon = strchr(attr, ':');
+                        if (colon) {
+                            *colon = '\0';
+                            gchar *value = colon + 1;
+                            if (g_str_has_prefix(attr, "fingerprint") || 
+                                g_str_has_prefix(attr, "setup") ||
+                                g_str_has_prefix(attr, "ice-ufrag") ||
+                                g_str_has_prefix(attr, "ice-pwd") ||
+                                g_str_has_prefix(attr, "ice-options") ||
+                                g_str_has_prefix(attr, "rtcp-mux")) {
+                                if (in_media) {
+                                    g_print("    Attribute: %s=%s\n", attr, value);
+                                } else {
+                                    g_print("  Attribute: %s=%s\n", attr, value);
+                                }
+                            } else if (g_str_has_prefix(attr, "rtpmap")) {
+                                if (in_media) {
+                                    g_print("    RTP Map: %s\n", value);
+                                } else {
+                                    g_print("  RTP Map: %s\n", value);
+                                }
+                            } else if (g_str_has_prefix(attr, "fmtp")) {
+                                if (in_media) {
+                                    g_print("    Format Parameters: %s\n", value);
+                                } else {
+                                    g_print("  Format Parameters: %s\n", value);
+                                }
+                            } else if (g_str_has_prefix(attr, "ssrc")) {
+                                if (in_media) {
+                                    g_print("    SSRC: %s\n", value);
+                                } else {
+                                    g_print("  SSRC: %s\n", value);
+                                }
+                            } else {
+                                if (in_media) {
+                                    g_print("    Attribute: %s:%s\n", attr, value);
+                                } else {
+                                    g_print("  Attribute: %s:%s\n", attr, value);
+                                }
+                            }
+                            *colon = ':';  // restore
+                        } else {
+                            if (g_strcmp0(attr, "sendrecv") == 0 ||
+                                g_strcmp0(attr, "sendonly") == 0 ||
+                                g_strcmp0(attr, "recvonly") == 0 ||
+                                g_strcmp0(attr, "inactive") == 0) {
+                                if (in_media) {
+                                    g_print("    Direction: %s\n", attr);
+                                } else {
+                                    g_print("  Direction: %s\n", attr);
+                                }
+                            } else if (g_str_has_prefix(attr, "mid:")) {
+                                if (in_media) {
+                                    g_print("    Media ID: %s\n", attr + 4);
+                                } else {
+                                    g_print("  Media ID: %s\n", attr + 4);
+                                }
+                            } else {
+                                if (in_media) {
+                                    g_print("    Attribute: %s\n", attr);
+                                } else {
+                                    g_print("  Attribute: %s\n", attr);
+                                }
+                            }
+                        }
+                    }
+                    break;
+            }
+            
+            g_free(line);
+        }
+        
+        // Move to next line
+        line_start = line_end;
+        if (*line_start == '\r') line_start++;
+        if (*line_start == '\n') line_start++;
+        if (*line_start == '\0') break;
+    }
+    
+    g_print("--- End of %s SDP Details ---\n\n", title);
+}
+
 static void force_setup_active(GstSDPMessage *sdp) {
     guint media_len = gst_sdp_message_medias_len(sdp);
     for (guint i = 0; i < media_len; ++i) {
@@ -199,15 +377,20 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
     gst_promise_unref(set_promise);
 
     gchar *sdp_str = gst_sdp_message_as_text(offer->sdp);
-    const gchar *setup = std::strstr(sdp_str, "a=setup:");
-    if (setup) {
-        const gchar *end = std::strchr(setup, '\n');
-        if (end) {
-            g_print("[client] Offer %.*s\n", (int)(end - setup), setup);
-        } else {
-            g_print("[client] Offer %s\n", setup);
-        }
-    }
+    
+    // Offer 송신 로그 출력
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "📤 OFFER 송신 (클라이언트 -> 서버)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    g_print("[client] Sending offer to server\n");
+    g_print("[client] Offer SDP length: %zu bytes\n", std::strlen(sdp_str));
+    
+    // SDP 상세 정보 출력
+    print_sdp_details("OFFER", sdp_str);
+    
+    // Full SDP text 출력
+    g_print("[client] Full OFFER SDP:\n");
+    g_print("%s\n", sdp_str);
 
     JsonBuilder *builder = json_builder_new();
     json_builder_begin_object(builder);
@@ -226,12 +409,30 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
         JsonObject *obj = json_node_get_object(response);
         const gchar *answer_sdp = json_object_get_string_member(obj, "sdp");
         const gchar *answer_type = json_object_get_string_member(obj, "type");
+        
+        // Answer 수신 로그 출력
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "📥 ANSWER 수신 (서버 -> 클라이언트)" << std::endl;
+        std::cout << "========================================\n" << std::endl;
+        
         if (answer_sdp && answer_type && g_strcmp0(answer_type, "answer") == 0) {
+            g_print("[client] Received valid answer from server\n");
+            g_print("[client] Answer SDP length: %zu bytes\n", std::strlen(answer_sdp));
+            g_print("[client] Answer type: %s\n", answer_type);
+            
+            // SDP 상세 정보 출력
+            print_sdp_details("ANSWER", answer_sdp);
+            
+            // Full SDP text 출력
+            g_print("[client] Full ANSWER SDP:\n");
+            g_print("%s\n", answer_sdp);
+            
             GstSDPMessage *sdp = nullptr;
             gst_sdp_message_new(&sdp);
             gst_sdp_message_parse_buffer(reinterpret_cast<const guint8 *>(answer_sdp), std::strlen(answer_sdp), sdp);
             GstWebRTCSessionDescription *answer =
                 gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
+            
             GstPromise *remote_promise = gst_promise_new();
             g_signal_emit_by_name(app->webrtcbin, "set-remote-description", answer, remote_promise);
             gst_promise_interrupt(remote_promise);
@@ -239,12 +440,24 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
             gst_webrtc_session_description_free(answer);
             app->remote_desc_set = true;
             flush_pending_ice(app);
+            
+            std::cout << "✅ ANSWER 처리 완료\n" << std::endl;
         } else {
             g_printerr("[client] Invalid answer from server\n");
+            if (answer_type) {
+                g_printerr("[client] Expected type 'answer', got '%s'\n", answer_type);
+            }
+            if (!answer_sdp) {
+                g_printerr("[client] Answer SDP is null\n");
+            }
+            std::cout << "❌ ANSWER 처리 실패\n" << std::endl;
         }
         json_node_free(response);
     } else {
         g_printerr("[client] Failed to get answer from server\n");
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "❌ ANSWER 수신 실패 (서버 응답 없음)" << std::endl;
+        std::cout << "========================================\n" << std::endl;
     }
 
     json_node_free(root);

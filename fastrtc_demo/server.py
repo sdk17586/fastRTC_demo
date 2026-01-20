@@ -176,6 +176,25 @@ class FastRTCServer:
         if not webrtc_id:
             return {"status": "failed", "meta": {"error": "missing_webrtc_id"}}
 
+        # Offer 수신 로그 출력
+        print("\n========================================")
+        print("📥 OFFER 수신 (클라이언트 -> 서버)")
+        print("========================================\n")
+        offer_sdp = body.get("sdp", "")
+        offer_type = body.get("type", "")
+        print(f"[server] Received offer from client")
+        print(f"[server] Offer SDP length: {len(offer_sdp)} bytes")
+        print(f"[server] Offer type: {offer_type}")
+        print(f"[server] WebRTC ID: {webrtc_id}")
+        
+        # SDP 상세 정보 출력
+        self._parse_sdp_details(offer_sdp, "OFFER")
+        
+        # Full SDP text 출력
+        print("[server] Full OFFER SDP:")
+        print(offer_sdp)
+        print()
+
         result = await self.stream.handle_offer(
             body, set_outputs=self.stream.set_additional_outputs(webrtc_id)
         )
@@ -187,6 +206,31 @@ class FastRTCServer:
                 "sdp": pc.localDescription.sdp,
                 "type": pc.localDescription.type,
             }
+            
+            # Answer 송신 로그 출력
+            print("\n========================================")
+            print("📤 ANSWER 송신 (서버 -> 클라이언트)")
+            print("========================================\n")
+            answer_sdp = result.get("sdp", "")
+            answer_type = result.get("type", "")
+            print(f"[server] Sending answer to client")
+            print(f"[server] Answer SDP length: {len(answer_sdp)} bytes")
+            print(f"[server] Answer type: {answer_type}")
+            
+            # SDP 상세 정보 출력
+            self._parse_sdp_details(answer_sdp, "ANSWER")
+            
+            # Full SDP text 출력
+            print("[server] Full ANSWER SDP:")
+            print(answer_sdp)
+            print()
+            
+            print("✅ ANSWER 전송 완료\n")
+        else:
+            print("\n========================================")
+            print("❌ ANSWER 생성 실패 (PeerConnection 없음)")
+            print("========================================\n")
+            
         return result
 
     def handle_root(self) -> dict[str, str]:
@@ -208,6 +252,77 @@ class FastRTCServer:
         app.post("/webrtc/ice")(self.handle_webrtc_ice)
         app.get("/")(self.handle_root)
         app.get("/video")(self.handle_video_feed)
+
+    def _parse_sdp_details(self, sdp_text: str, title: str) -> None:
+        """Parse and print detailed SDP information"""
+        print(f"\n--- {title} SDP Details ---")
+        
+        lines = sdp_text.split("\n")
+        current_media = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            if line.startswith("v="):
+                print(f"Version: {line[2:]}")
+            elif line.startswith("o="):
+                parts = line[2:].split()
+                if len(parts) >= 6:
+                    print(f"Origin: username={parts[0]}, sess-id={parts[1]}, sess-version={parts[2]}, nettype={parts[3]}, addrtype={parts[4]}, address={parts[5]}")
+            elif line.startswith("s="):
+                print(f"Session Name: {line[2:]}")
+            elif line.startswith("i="):
+                print(f"Session Info: {line[2:]}")
+            elif line.startswith("u="):
+                print(f"URI: {line[2:]}")
+            elif line.startswith("e="):
+                print(f"Email: {line[2:]}")
+            elif line.startswith("p="):
+                print(f"Phone: {line[2:]}")
+            elif line.startswith("c="):
+                parts = line[2:].split()
+                if len(parts) >= 3:
+                    print(f"Connection: nettype={parts[0]}, addrtype={parts[1]}, address={parts[2]}")
+            elif line.startswith("t="):
+                parts = line[2:].split()
+                if len(parts) >= 2:
+                    print(f"Timing: start={parts[0]}, stop={parts[1]}")
+            elif line.startswith("a="):
+                attr = line[2:]
+                if ":" in attr:
+                    key, value = attr.split(":", 1)
+                    if key in ["fingerprint", "setup", "ice-ufrag", "ice-pwd", "ice-options", "rtcp-mux"]:
+                        print(f"  Attribute: {key}={value}")
+                    elif key.startswith("rtpmap"):
+                        print(f"  RTP Map: {value}")
+                    elif key.startswith("fmtp"):
+                        print(f"  Format Parameters: {value}")
+                    elif key.startswith("ssrc"):
+                        print(f"  SSRC: {value}")
+                    else:
+                        print(f"  Attribute: {attr}")
+                else:
+                    if attr in ["sendrecv", "sendonly", "recvonly", "inactive"]:
+                        print(f"  Direction: {attr}")
+                    elif attr.startswith("mid:"):
+                        print(f"  Media ID: {attr[4:]}")
+                    else:
+                        print(f"  Attribute: {attr}")
+            elif line.startswith("m="):
+                if current_media is not None:
+                    print()  # Separate media blocks
+                parts = line[2:].split()
+                if len(parts) >= 3:
+                    media_type = parts[0]
+                    port = parts[1]
+                    protocol = parts[2]
+                    formats = " ".join(parts[3:]) if len(parts) > 3 else "none"
+                    print(f"Media: type={media_type}, port={port}, protocol={protocol}, formats=[{formats}]")
+                    current_media = media_type
+        
+        print(f"--- End of {title} SDP Details ---\n")
 
     def _normalize_candidate(self, body: dict) -> None:
         candidate = body.get("candidate")
