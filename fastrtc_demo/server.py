@@ -14,6 +14,19 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastrtc import Stream
+from fastrtc.tracks import VideoCallback
+
+# Allow video processing even when no data channel is negotiated.
+_orig_video_callback_init = VideoCallback.__init__
+
+
+def _video_callback_init_no_channel(self, *args, **kwargs):
+    _orig_video_callback_init(self, *args, **kwargs)
+    if self.channel is None:
+        self.channel_set.set()
+
+
+VideoCallback.__init__ = _video_callback_init_no_channel
 
 logging.basicConfig(level=logging.INFO)
 # RTP 패킷 로그를 줄이기 위해 INFO 레벨로 설정

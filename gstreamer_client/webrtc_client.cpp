@@ -366,13 +366,6 @@ bool WebRTCClient::start() {
 
     gst_element_set_state(pImpl->pipeline, GST_STATE_READY);
 
-    // Data channel 생성
-    GstWebRTCDataChannel *data_channel = nullptr;
-    g_signal_emit_by_name(pImpl->webrtcbin, "create-data-channel", "client-data", nullptr, &data_channel);
-    if (data_channel) {
-        g_object_unref(data_channel);
-    }
-
     // Bus watch 설정
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pImpl->pipeline));
     pImpl->bus_watch_id = gst_bus_add_watch(bus, Impl::bus_call, pImpl.get());
