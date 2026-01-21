@@ -36,6 +36,36 @@ logging.getLogger("aioice").setLevel(logging.INFO)
 logging.getLogger("aiortc.rtcrtpsender").setLevel(logging.WARNING)
 logging.getLogger("aiortc.rtcrtpreceiver").setLevel(logging.WARNING)
 
+# RTP packet debug logs (aiortc rtcrtpreceiver). Use carriage-return updates.
+class _RtpCarriageHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self._last_ts = time.time()
+        self._count = 0
+        self._last_msg = ""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if not msg:
+            return
+        self._count += 1
+        self._last_msg = msg
+        now = time.time()
+        if now - self._last_ts >= 1.0:
+            print(
+                f"\r[server][rtp] packets:{self._count} last:{self._last_msg}    ",
+                end="",
+                flush=True,
+            )
+            self._count = 0
+            self._last_ts = now
+
+
+_rtp_logger = logging.getLogger("aiortc.rtcrtpreceiver")
+_rtp_logger.setLevel(logging.DEBUG)
+_rtp_logger.addHandler(_RtpCarriageHandler())
+_rtp_logger.propagate = False
+
 
 class FastRTCServer:
     MJPEG_SLEEP = 0.03
@@ -99,21 +129,21 @@ class FastRTCServer:
     def _log_frame_stats(self, frame: np.ndarray, current_time: float) -> None:
         if self.frame_count == 1:
             # 캐리지 리턴으로 같은 줄에 덮어쓰기
-            message = (
-                f"[서버] ✅ 첫 프레임 수신! 프레임 크기: {frame.shape}, "
-                f"데이터 타입: {frame.dtype}"
-            )
-            print(f"\r{message:<100}", end="", flush=True)
+            # message = (
+            #     f"[서버] ✅ 첫 프레임 수신! 프레임 크기: {frame.shape}, "
+            #     f"데이터 타입: {frame.dtype}"
+            # )
+            # print(f"\r{message:<100}", end="", flush=True)
             self.last_log_time = current_time
 
         if current_time - self.last_log_time >= 1.0:
             fps = self.frame_count / (current_time - self.last_log_time)
             # 캐리지 리턴으로 같은 줄에 덮어쓰기
-            message = (
-                f"[서버] 프레임 수신 중... 총 {self.frame_count}개 프레임 수신, "
-                f"FPS: {fps:.2f}, 크기: {frame.shape}, 타입: {frame.dtype}"
-            )
-            print(f"\r{message:<100}", end="", flush=True)
+            # message = (
+            #     f"[서버] 프레임 수신 중... 총 {self.frame_count}개 프레임 수신, "
+            #     f"FPS: {fps:.2f}, 크기: {frame.shape}, 타입: {frame.dtype}"
+            # )
+            # print(f"\r{message:<100}", end="", flush=True)
             self.frame_count = 0
             self.last_log_time = current_time
 

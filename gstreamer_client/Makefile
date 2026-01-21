@@ -1,5 +1,5 @@
 CXX := g++
-PKGS := gstreamer-1.0 gstreamer-webrtc-1.0 gstreamer-sdp-1.0 libsoup-3.0 json-glib-1.0
+PKGS := gstreamer-1.0 gstreamer-webrtc-1.0 gstreamer-sdp-1.0 gstreamer-rtp-1.0 libsoup-3.0 json-glib-1.0
 CXXFLAGS := -O2 -Wall -Wextra -std=c++17 -DGST_USE_UNSTABLE_API $(shell pkg-config --cflags $(PKGS))
 LDFLAGS := $(shell pkg-config --libs $(PKGS))
 
