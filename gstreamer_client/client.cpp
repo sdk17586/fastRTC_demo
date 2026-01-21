@@ -33,6 +33,47 @@ static void log_msg(const gchar *msg) {
     g_print("[client] %s\n", msg);
 }
 
+// Logger functions for cleaner code
+static void log_section(const gchar *emoji, const gchar *title) {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << emoji << " " << title << std::endl;
+    std::cout << "========================================\n" << std::endl;
+}
+
+static void log_success(const gchar *message) {
+    std::cout << "✅ " << message << "\n" << std::endl;
+}
+
+static void log_failure(const gchar *message) {
+    std::cout << "❌ " << message << "\n" << std::endl;
+}
+
+static void log_offer_send(const gchar *sdp_str) {
+    log_section("📤", "OFFER 송신 (클라이언트 -> 서버)");
+    g_print("[client] Sending offer to server\n");
+    g_print("[client] Offer SDP length: %zu bytes\n", std::strlen(sdp_str));
+}
+
+static void log_answer_receive(const gchar *answer_sdp, const gchar *answer_type) {
+    log_section("📥", "ANSWER 수신 (서버 -> 클라이언트)");
+    g_print("[client] Received valid answer from server\n");
+    g_print("[client] Answer SDP length: %zu bytes\n", std::strlen(answer_sdp));
+    g_print("[client] Answer type: %s\n", answer_type);
+}
+
+static void log_answer_receive_failed() {
+    log_section("❌", "ANSWER 수신 실패 (서버 응답 없음)");
+}
+
+static void log_ice_candidate_send(guint mlineindex, const gchar *sdp_mid, const gchar *candidate) {
+    log_section("📤", "ICE CANDIDATE 송신 (클라이언트 -> 서버)");
+    g_print("[client] Sending ICE candidate to server\n");
+    g_print("[client] Media Line Index: %u\n", mlineindex);
+    g_print("[client] SDP MID: %s\n", sdp_mid);
+    g_print("[client] Candidate String: %s\n", candidate);
+    g_print("[client] ICE Candidate Details:\n");
+}
+
 static gchar *json_node_to_string(JsonNode *root) {
     JsonGenerator *gen = json_generator_new();
     json_generator_set_root(gen, root);
@@ -172,14 +213,7 @@ static void send_ice_candidate(AppState *app, guint mlineindex, const gchar *can
     }
 
     // ICE 송신 로그 출력
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "📤 ICE CANDIDATE 송신 (클라이언트 -> 서버)" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    g_print("[client] Sending ICE candidate to server\n");
-    g_print("[client] Media Line Index: %u\n", mlineindex);
-    g_print("[client] SDP MID: %s\n", sdp_mid);
-    g_print("[client] Candidate String: %s\n", candidate);
-    g_print("[client] ICE Candidate Details:\n");
+    log_ice_candidate_send(mlineindex, sdp_mid, candidate);
     parse_ice_candidate_details(candidate);
 
     JsonBuilder *builder = json_builder_new();
@@ -201,9 +235,9 @@ static void send_ice_candidate(AppState *app, guint mlineindex, const gchar *can
     JsonNode *response = post_json(app, "/webrtc/ice", root);
     if (response) {
         json_node_free(response);
-        std::cout << "✅ ICE CANDIDATE 전송 완료\n" << std::endl;
+        log_success("ICE CANDIDATE 전송 완료");
     } else {
-        std::cout << "❌ ICE CANDIDATE 전송 실패\n" << std::endl;
+        log_failure("ICE CANDIDATE 전송 실패");
     }
     json_node_free(root);
     g_object_unref(builder);
@@ -453,16 +487,8 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
     gchar *sdp_str = gst_sdp_message_as_text(offer->sdp);
     
     // Offer 송신 로그 출력
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "📤 OFFER 송신 (클라이언트 -> 서버)" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    g_print("[client] Sending offer to server\n");
-    g_print("[client] Offer SDP length: %zu bytes\n", std::strlen(sdp_str));
-    
-    // SDP 상세 정보 출력
+    log_offer_send(sdp_str);
     print_sdp_details("OFFER", sdp_str);
-    
-    // Full SDP text 출력
     g_print("[client] Full OFFER SDP:\n");
     g_print("%s\n", sdp_str);
 
@@ -484,20 +510,10 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
         const gchar *answer_sdp = json_object_get_string_member(obj, "sdp");
         const gchar *answer_type = json_object_get_string_member(obj, "type");
         
-        // Answer 수신 로그 출력
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "📥 ANSWER 수신 (서버 -> 클라이언트)" << std::endl;
-        std::cout << "========================================\n" << std::endl;
-        
         if (answer_sdp && answer_type && g_strcmp0(answer_type, "answer") == 0) {
-            g_print("[client] Received valid answer from server\n");
-            g_print("[client] Answer SDP length: %zu bytes\n", std::strlen(answer_sdp));
-            g_print("[client] Answer type: %s\n", answer_type);
-            
-            // SDP 상세 정보 출력
+            // Answer 수신 로그 출력
+            log_answer_receive(answer_sdp, answer_type);
             print_sdp_details("ANSWER", answer_sdp);
-            
-            // Full SDP text 출력
             g_print("[client] Full ANSWER SDP:\n");
             g_print("%s\n", answer_sdp);
             
@@ -514,8 +530,7 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
             gst_webrtc_session_description_free(answer);
             app->remote_desc_set = true;
             flush_pending_ice(app);
-            
-            std::cout << "✅ ANSWER 처리 완료\n" << std::endl;
+            log_success("ANSWER 처리 완료");
         } else {
             g_printerr("[client] Invalid answer from server\n");
             if (answer_type) {
@@ -524,14 +539,12 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
             if (!answer_sdp) {
                 g_printerr("[client] Answer SDP is null\n");
             }
-            std::cout << "❌ ANSWER 처리 실패\n" << std::endl;
+            log_failure("ANSWER 처리 실패");
         }
         json_node_free(response);
     } else {
         g_printerr("[client] Failed to get answer from server\n");
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "❌ ANSWER 수신 실패 (서버 응답 없음)" << std::endl;
-        std::cout << "========================================\n" << std::endl;
+        log_answer_receive_failed();
     }
 
     json_node_free(root);
