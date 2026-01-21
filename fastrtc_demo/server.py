@@ -162,13 +162,37 @@ class FastRTCServer:
     async def handle_webrtc_ice(self, request: Request):
         body = await request.json()
         body.setdefault("type", "ice-candidate")
+        
+        # ICE 수신 로그 출력
+        print("\n========================================")
+        print("📥 ICE CANDIDATE 수신 (클라이언트 -> 서버)")
+        print("========================================\n")
+        
+        candidate_obj = body.get("candidate", {})
+        candidate_str = candidate_obj.get("candidate", "") if isinstance(candidate_obj, dict) else ""
+        sdp_mid = candidate_obj.get("sdpMid", "") if isinstance(candidate_obj, dict) else ""
+        sdp_mline_index = candidate_obj.get("sdpMLineIndex", -1) if isinstance(candidate_obj, dict) else -1
+        webrtc_id = body.get("webrtc_id", "")
+        
+        print(f"[server] Received ICE candidate from client")
+        print(f"[server] WebRTC ID: {webrtc_id}")
+        print(f"[server] SDP MID: {sdp_mid}")
+        print(f"[server] SDP MLine Index: {sdp_mline_index}")
+        print(f"[server] Candidate String: {candidate_str}")
+        print(f"[server] ICE Candidate Details:")
+        self._parse_ice_candidate_details(candidate_str)
+        
         self._normalize_candidate(body)
-        webrtc_id = body.get("webrtc_id")
         if not webrtc_id:
+            print("❌ ICE CANDIDATE 처리 실패 (webrtc_id 없음)\n")
             return {"status": "failed", "meta": {"error": "missing_webrtc_id"}}
-        return await self.stream.handle_offer(
+        
+        result = await self.stream.handle_offer(
             body, set_outputs=self.stream.set_additional_outputs(webrtc_id)
         )
+        
+        print("✅ ICE CANDIDATE 처리 완료\n")
+        return result
 
     async def handle_webrtc_offer(self, request: Request):
         body = await request.json()
@@ -252,6 +276,52 @@ class FastRTCServer:
         app.post("/webrtc/ice")(self.handle_webrtc_ice)
         app.get("/")(self.handle_root)
         app.get("/video")(self.handle_video_feed)
+
+    def _parse_ice_candidate_details(self, candidate_str: str) -> None:
+        """Parse and print detailed ICE candidate information"""
+        if not candidate_str:
+            return
+        
+        # ICE candidate 형식: candidate:<foundation> <component-id> <transport> <priority> <ip> <port> typ <type> [options...]
+        if ":" not in candidate_str:
+            print(f"    Raw candidate: {candidate_str}")
+            return
+        
+        rest = candidate_str.split(":", 1)[1]
+        parts = rest.split()
+        
+        if len(parts) >= 7:
+            print(f"    Foundation: {parts[0]}")
+            print(f"    Component ID: {parts[1]}")
+            print(f"    Transport: {parts[2]}")
+            print(f"    Priority: {parts[3]}")
+            print(f"    IP Address: {parts[4]}")
+            print(f"    Port: {parts[5]}")
+            
+            # typ 필드 찾기
+            for i in range(6, len(parts)):
+                if parts[i] == "typ" and i + 1 < len(parts):
+                    print(f"    Type: {parts[i + 1]}")
+                    break
+            
+            # 추가 옵션 파싱
+            for i in range(6, len(parts)):
+                if parts[i] == "raddr" and i + 1 < len(parts):
+                    print(f"    Remote Address: {parts[i + 1]}")
+                elif parts[i] == "rport" and i + 1 < len(parts):
+                    print(f"    Remote Port: {parts[i + 1]}")
+                elif parts[i] == "generation" and i + 1 < len(parts):
+                    print(f"    Generation: {parts[i + 1]}")
+                elif parts[i] == "ufrag" and i + 1 < len(parts):
+                    print(f"    ICE Ufrag: {parts[i + 1]}")
+                elif parts[i] == "network-id" and i + 1 < len(parts):
+                    print(f"    Network ID: {parts[i + 1]}")
+                elif parts[i] == "network-cost" and i + 1 < len(parts):
+                    print(f"    Network Cost: {parts[i + 1]}")
+                elif parts[i] == "tcptype" and i + 1 < len(parts):
+                    print(f"    TCP Type: {parts[i + 1]}")
+        else:
+            print(f"    Raw candidate: {rest}")
 
     def _parse_sdp_details(self, sdp_text: str, title: str) -> None:
         """Parse and print detailed SDP information"""

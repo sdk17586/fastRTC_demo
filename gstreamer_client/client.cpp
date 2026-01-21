@@ -92,6 +92,66 @@ static void queue_ice(AppState *app, guint mlineindex, const gchar *candidate) {
 
 static void flush_pending_ice(AppState *app);
 
+static void parse_ice_candidate_details(const gchar *candidate_str) {
+    if (!candidate_str) {
+        return;
+    }
+    
+    // ICE candidate 형식: candidate:<foundation> <component-id> <transport> <priority> <ip> <port> typ <type> [options...]
+    gchar *candidate = g_strdup(candidate_str);
+    gchar *colon = strstr(candidate, ":");
+    if (!colon) {
+        g_free(candidate);
+        return;
+    }
+    
+    gchar *rest = colon + 1;
+    gchar **parts = g_strsplit_set(rest, " \t", 0);
+    guint part_count = 0;
+    while (parts[part_count]) part_count++;
+    
+    if (part_count >= 7) {
+        g_print("    Foundation: %s\n", parts[0]);
+        g_print("    Component ID: %s\n", parts[1]);
+        g_print("    Transport: %s\n", parts[2]);
+        g_print("    Priority: %s\n", parts[3]);
+        g_print("    IP Address: %s\n", parts[4]);
+        g_print("    Port: %s\n", parts[5]);
+        
+        // typ 필드 찾기
+        for (guint i = 6; i < part_count; ++i) {
+            if (g_strcmp0(parts[i], "typ") == 0 && i + 1 < part_count) {
+                g_print("    Type: %s\n", parts[i + 1]);
+                break;
+            }
+        }
+        
+        // 추가 옵션 파싱
+        for (guint i = 6; i < part_count; ++i) {
+            if (g_strcmp0(parts[i], "raddr") == 0 && i + 1 < part_count) {
+                g_print("    Remote Address: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "rport") == 0 && i + 1 < part_count) {
+                g_print("    Remote Port: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "generation") == 0 && i + 1 < part_count) {
+                g_print("    Generation: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "ufrag") == 0 && i + 1 < part_count) {
+                g_print("    ICE Ufrag: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "network-id") == 0 && i + 1 < part_count) {
+                g_print("    Network ID: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "network-cost") == 0 && i + 1 < part_count) {
+                g_print("    Network Cost: %s\n", parts[i + 1]);
+            } else if (g_strcmp0(parts[i], "tcptype") == 0 && i + 1 < part_count) {
+                g_print("    TCP Type: %s\n", parts[i + 1]);
+            }
+        }
+    } else {
+        g_print("    Raw candidate: %s\n", rest);
+    }
+    
+    g_strfreev(parts);
+    g_free(candidate);
+}
+
 static void send_ice_candidate(AppState *app, guint mlineindex, const gchar *candidate) {
     if (!app->remote_desc_set) {
         queue_ice(app, mlineindex, candidate);
@@ -110,6 +170,17 @@ static void send_ice_candidate(AppState *app, guint mlineindex, const gchar *can
         g_print("[client] Dropping ICE TCP candidate (mid=%s)\n", sdp_mid);
         return;
     }
+
+    // ICE 송신 로그 출력
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "📤 ICE CANDIDATE 송신 (클라이언트 -> 서버)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    g_print("[client] Sending ICE candidate to server\n");
+    g_print("[client] Media Line Index: %u\n", mlineindex);
+    g_print("[client] SDP MID: %s\n", sdp_mid);
+    g_print("[client] Candidate String: %s\n", candidate);
+    g_print("[client] ICE Candidate Details:\n");
+    parse_ice_candidate_details(candidate);
 
     JsonBuilder *builder = json_builder_new();
     json_builder_begin_object(builder);
@@ -130,6 +201,9 @@ static void send_ice_candidate(AppState *app, guint mlineindex, const gchar *can
     JsonNode *response = post_json(app, "/webrtc/ice", root);
     if (response) {
         json_node_free(response);
+        std::cout << "✅ ICE CANDIDATE 전송 완료\n" << std::endl;
+    } else {
+        std::cout << "❌ ICE CANDIDATE 전송 실패\n" << std::endl;
     }
     json_node_free(root);
     g_object_unref(builder);
@@ -484,8 +558,80 @@ static void on_ice_candidate(GstElement *webrtcbin, guint mlineindex, gchar *can
         if (!mid || !*mid) {
             mid = "0";
         }
-        g_print("[client] ICE candidate gathered (mline=%u, mid=%s): %s\n", mlineindex, mid, candidate);
+        g_print("[client] ICE candidate gathered (mline=%u, mid=%s)\n", mlineindex, mid);
         send_ice_candidate(app, mlineindex, candidate);
+    }
+}
+
+static const gchar *ice_gathering_state_to_string(GstWebRTCICEGatheringState state) {
+    switch (state) {
+        case GST_WEBRTC_ICE_GATHERING_STATE_NEW:
+            return "NEW";
+        case GST_WEBRTC_ICE_GATHERING_STATE_GATHERING:
+            return "GATHERING";
+        case GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE:
+            return "COMPLETE";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const gchar *ice_connection_state_to_string(GstWebRTCICEConnectionState state) {
+    switch (state) {
+        case GST_WEBRTC_ICE_CONNECTION_STATE_NEW:
+            return "NEW";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_CHECKING:
+            return "CHECKING";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_CONNECTED:
+            return "CONNECTED";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_COMPLETED:
+            return "COMPLETED";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_FAILED:
+            return "FAILED";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_DISCONNECTED:
+            return "DISCONNECTED";
+        case GST_WEBRTC_ICE_CONNECTION_STATE_CLOSED:
+            return "CLOSED";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const gchar *signaling_state_to_string(GstWebRTCSignalingState state) {
+    switch (state) {
+        case GST_WEBRTC_SIGNALING_STATE_STABLE:
+            return "STABLE";
+        case GST_WEBRTC_SIGNALING_STATE_CLOSED:
+            return "CLOSED";
+        case GST_WEBRTC_SIGNALING_STATE_HAVE_LOCAL_OFFER:
+            return "HAVE_LOCAL_OFFER";
+        case GST_WEBRTC_SIGNALING_STATE_HAVE_REMOTE_OFFER:
+            return "HAVE_REMOTE_OFFER";
+        case GST_WEBRTC_SIGNALING_STATE_HAVE_LOCAL_PRANSWER:
+            return "HAVE_LOCAL_PRANSWER";
+        case GST_WEBRTC_SIGNALING_STATE_HAVE_REMOTE_PRANSWER:
+            return "HAVE_REMOTE_PRANSWER";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const gchar *connection_state_to_string(GstWebRTCPeerConnectionState state) {
+    switch (state) {
+        case GST_WEBRTC_PEER_CONNECTION_STATE_NEW:
+            return "NEW";
+        case GST_WEBRTC_PEER_CONNECTION_STATE_CONNECTING:
+            return "CONNECTING";
+        case GST_WEBRTC_PEER_CONNECTION_STATE_CONNECTED:
+            return "CONNECTED";
+        case GST_WEBRTC_PEER_CONNECTION_STATE_DISCONNECTED:
+            return "DISCONNECTED";
+        case GST_WEBRTC_PEER_CONNECTION_STATE_FAILED:
+            return "FAILED";
+        case GST_WEBRTC_PEER_CONNECTION_STATE_CLOSED:
+            return "CLOSED";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -502,8 +648,11 @@ static void on_webrtc_state_changed(GObject *obj, GParamSpec *pspec, gpointer us
     g_object_get(obj, "signaling-state", &signaling_state, nullptr);
     g_object_get(obj, "connection-state", &conn_state, nullptr);
 
-    g_print("[client] ICE gathering=%d ICE conn=%d signaling=%d conn=%d\n",
-            ice_state, ice_conn_state, signaling_state, conn_state);
+    g_print("[client] WebRTC State: ICE_Gathering=%s(%d) ICE_Connection=%s(%d) Signaling=%s(%d) Connection=%s(%d)\n",
+            ice_gathering_state_to_string(ice_state), ice_state,
+            ice_connection_state_to_string(ice_conn_state), ice_conn_state,
+            signaling_state_to_string(signaling_state), signaling_state,
+            connection_state_to_string(conn_state), conn_state);
 }
 
 static void handle_media_stream(GstPad *pad, GstElement *pipe, const char *convert_name) {
