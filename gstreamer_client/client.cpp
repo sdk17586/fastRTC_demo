@@ -503,6 +503,7 @@ static void on_offer_created(GstPromise *promise, gpointer user_data) {
     json_builder_end_object(builder);
 
     JsonNode *root = json_builder_get_root(builder);
+    //json으로 변환하여 서버로 offer로 전송과 동시에 asnwer을 받아오는 역할
     JsonNode *response = post_json(app, "/webrtc/offer", root);
 
     if (response) {

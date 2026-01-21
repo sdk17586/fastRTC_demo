@@ -13,7 +13,7 @@ SRCS := client.cpp
 
 # 새로운 간단한 클라이언트 (고수준 API 사용)
 SIMPLE_TARGET := simple_client
-SIMPLE_SRCS := simple_client.cpp webrtc_client.cpp
+SIMPLE_SRCS := simple_client.cpp webrtc_client.cpp signaling_transport.cpp
 
 # 실행 파일 경로
 TARGET_BIN := $(BIN_DIR)/$(TARGET)

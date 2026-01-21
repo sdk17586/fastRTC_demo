@@ -3,14 +3,14 @@
 #include <gst/gst.h>
 #include <gst/sdp/sdp.h>
 #include <gst/webrtc/webrtc.h>
-#include <json-glib/json-glib.h>
-#include <libsoup/soup.h>
+#include "signaling_transport.h"
 #include <glib.h>
 
 #include <cstring>
 #include <iostream>
 #include <thread>
 #include <mutex>
+#include <atomic>
 
 #define STUN_SERVER "stun://stun.l.google.com:19302"
 
@@ -26,8 +26,8 @@ public:
     // GStreamer 관련
     GstElement *pipeline = nullptr;
     GstElement *webrtcbin = nullptr;
-    SoupSession *soup = nullptr;
     GMainLoop *loop = nullptr;
+    guint bus_watch_id = 0;
 
     // 설정
     std::string server_url;
@@ -45,22 +45,45 @@ public:
     ConnectionState current_state = ConnectionState::DISCONNECTED;
 
     mutable std::mutex state_mutex;  // const 메서드에서도 락을 걸 수 있도록 mutable
+    std::atomic<bool> loop_running{false};
+    std::atomic<bool> shutting_down{false};
+    std::thread loop_thread;
+    std::mutex cleanup_mutex;
+
+    std::unique_ptr<ISignalingTransport> transport;
 
     Impl(const std::string& url, const CameraConfig& config)
         : server_url(url), camera_config(config) {
-        soup = soup_session_new();
+        transport = std::make_unique<HttpSignalingTransport>(url);
         pending_ice = g_queue_new();
         mids = g_ptr_array_new_with_free_func(g_free);
         webrtc_id = g_uuid_string_random();
     }
 
     ~Impl() {
-        cleanup();
+        requestStop();
+        if (loop_thread.joinable() && std::this_thread::get_id() != loop_thread.get_id()) {
+            loop_thread.join();
+        }
+        cleanupPipeline();
+        cleanupSession();
     }
 
-    void cleanup() {
+    void requestStop() {
+        shutting_down = true;
         if (loop) {
             g_main_loop_quit(loop);
+        }
+    }
+
+    void cleanupPipeline() {
+        std::lock_guard<std::mutex> lock(cleanup_mutex);
+        if (bus_watch_id != 0) {
+            g_source_remove(bus_watch_id);
+            bus_watch_id = 0;
+        }
+
+        if (loop) {
             g_main_loop_unref(loop);
             loop = nullptr;
         }
@@ -68,18 +91,16 @@ public:
         if (pipeline) {
             gst_element_set_state(pipeline, GST_STATE_NULL);
             if (webrtcbin) {
+                g_signal_handlers_disconnect_by_data(webrtcbin, this);
                 gst_object_unref(webrtcbin);
                 webrtcbin = nullptr;
             }
             gst_object_unref(pipeline);
             pipeline = nullptr;
         }
+    }
 
-        if (soup) {
-            g_object_unref(soup);
-            soup = nullptr;
-        }
-
+    void cleanupSession() {
         if (webrtc_id) {
             g_free(webrtc_id);
             webrtc_id = nullptr;
@@ -101,11 +122,37 @@ public:
         }
     }
 
+    void resetSessionState() {
+        shutting_down = false;
+        remote_desc_set = false;
+        if (webrtc_id) {
+            g_free(webrtc_id);
+        }
+        webrtc_id = g_uuid_string_random();
+        if (mids) {
+            g_ptr_array_set_size(mids, 0);
+        }
+        if (pending_ice) {
+            while (!g_queue_is_empty(pending_ice)) {
+                PendingIce *p = static_cast<PendingIce *>(g_queue_pop_head(pending_ice));
+                g_free(p->candidate);
+                g_free(p);
+            }
+        }
+    }
+
     void setState(ConnectionState state) {
-        std::lock_guard<std::mutex> lock(state_mutex);
-        current_state = state;
-        if (state_callback) {
-            state_callback(state);
+        StateCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            if (current_state == state) {
+                return;
+            }
+            current_state = state;
+            callback = state_callback;
+        }
+        if (callback) {
+            callback(state);
         }
     }
 
@@ -115,10 +162,25 @@ public:
     }
 
     void reportError(const std::string& error) {
-        if (error_callback) {
-            error_callback(error);
+        if (shutting_down) {
+            return;
         }
+        emitError(error);
         setState(ConnectionState::FAILED);
+    }
+
+    void emitError(const std::string& error) {
+        if (shutting_down) {
+            return;
+        }
+        ErrorCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            callback = error_callback;
+        }
+        if (callback) {
+            callback(error);
+        }
     }
 
     // 정적 콜백 함수들 - Impl 포인터를 전달받아 인스턴스 메서드 호출
@@ -167,13 +229,13 @@ public:
     void handleDecodebinStream(GstPad *pad);
     void handleMediaStream(GstPad *pad, const char *convert_name);
     void handleWebRTCStateChanged(GObject *obj);
+    void runLoop();
 
     // 헬퍼 메서드들
     bool ensureElementAvailable(const gchar *name);
     void queueIce(guint mlineindex, const gchar *candidate);
     void flushPendingIce();
     void sendIceCandidate(guint mlineindex, const gchar *candidate);
-    JsonNode *postJson(const gchar *path, JsonNode *payload);
     void forceSetupActive(GstSDPMessage *sdp);
 };
 
@@ -192,12 +254,29 @@ WebRTCClient::~WebRTCClient() {
 }
 
 bool WebRTCClient::start() {
+    if (pImpl->pipeline || pImpl->webrtcbin) {
+        pImpl->reportError("Client already started");
+        return false;
+    }
+    if (!pImpl->transport || !pImpl->pending_ice || !pImpl->mids) {
+        pImpl->cleanupSession();
+        pImpl->transport = std::make_unique<HttpSignalingTransport>(pImpl->server_url);
+        pImpl->pending_ice = g_queue_new();
+        pImpl->mids = g_ptr_array_new_with_free_func(g_free);
+    }
+    pImpl->resetSessionState();
+
+    if (pImpl->camera_config.codec != "vp8" && pImpl->camera_config.codec != "h264") {
+        pImpl->reportError("Unsupported codec (use \"vp8\" or \"h264\")");
+        return false;
+    }
+
     if (!pImpl->ensureElementAvailable("v4l2src") ||
         !pImpl->ensureElementAvailable("videoconvert") ||
         !pImpl->ensureElementAvailable("videoscale") ||
         !pImpl->ensureElementAvailable("videorate") ||
-        !pImpl->ensureElementAvailable("vp8enc") ||
-        !pImpl->ensureElementAvailable("rtpvp8pay") ||
+        !pImpl->ensureElementAvailable(pImpl->camera_config.codec == "vp8" ? "vp8enc" : "x264enc") ||
+        !pImpl->ensureElementAvailable(pImpl->camera_config.codec == "vp8" ? "rtpvp8pay" : "rtph264pay") ||
         !pImpl->ensureElementAvailable("webrtcbin") ||
         !pImpl->ensureElementAvailable("nicesrc") ||
         !pImpl->ensureElementAvailable("nicesink") ||
@@ -263,19 +342,25 @@ bool WebRTCClient::start() {
                  "bundle-policy", GST_WEBRTC_BUNDLE_POLICY_MAX_BUNDLE,
                  nullptr);
 
-    // 시그널 연결
+    // offer 생성 및 수신 및 전송
     g_signal_connect(pImpl->webrtcbin, "on-negotiation-needed", 
                      G_CALLBACK(Impl::on_negotiation_needed), pImpl.get());
+    // ICE candidate 수신 및 전송
     g_signal_connect(pImpl->webrtcbin, "on-ice-candidate", 
                      G_CALLBACK(Impl::on_ice_candidate), pImpl.get());
+    // WebRTC 상태 변경 감지
     g_signal_connect(pImpl->webrtcbin, "notify::ice-gathering-state", 
                      G_CALLBACK(Impl::on_webrtc_state_changed), pImpl.get());
+    // ICE 연결 상태 변경 감지
     g_signal_connect(pImpl->webrtcbin, "notify::ice-connection-state", 
                      G_CALLBACK(Impl::on_webrtc_state_changed), pImpl.get());
+    // 시그널링 상태 변경 감지
     g_signal_connect(pImpl->webrtcbin, "notify::signaling-state", 
                      G_CALLBACK(Impl::on_webrtc_state_changed), pImpl.get());
+    // 연결 상태 변경 감지
     g_signal_connect(pImpl->webrtcbin, "notify::connection-state", 
                      G_CALLBACK(Impl::on_webrtc_state_changed), pImpl.get());
+    // 새로운 스트림 수신 감지. 서버에서 수신하는 미디어 데이터가 없어도 해당 코드라인이 없으면 링크에러남
     g_signal_connect(pImpl->webrtcbin, "pad-added", 
                      G_CALLBACK(Impl::on_incoming_stream), pImpl.get());
 
@@ -290,7 +375,7 @@ bool WebRTCClient::start() {
 
     // Bus watch 설정
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pImpl->pipeline));
-    gst_bus_add_watch(bus, Impl::bus_call, pImpl.get());
+    pImpl->bus_watch_id = gst_bus_add_watch(bus, Impl::bus_call, pImpl.get());
     gst_object_unref(bus);
 
     pImpl->setState(ConnectionState::CONNECTING);
@@ -304,21 +389,34 @@ bool WebRTCClient::start() {
 
 void WebRTCClient::stop() {
     if (pImpl) {
-        pImpl->cleanup();
+        pImpl->requestStop();
+        if (pImpl->loop_thread.joinable() &&
+            std::this_thread::get_id() != pImpl->loop_thread.get_id()) {
+            pImpl->loop_thread.join();
+        }
+        if (!pImpl->loop_running.load()) {
+            pImpl->cleanupPipeline();
+        }
         pImpl->setState(ConnectionState::DISCONNECTED);
     }
 }
 
 void WebRTCClient::run() {
     if (pImpl->loop) {
-        g_main_loop_run(pImpl->loop);
+        pImpl->runLoop();
     }
 }
 
 void WebRTCClient::runAsync() {
-    std::thread([this]() {
+    if (!pImpl->loop) {
+        return;
+    }
+    if (pImpl->loop_thread.joinable()) {
+        return;
+    }
+    pImpl->loop_thread = std::thread([this]() {
         run();
-    }).detach();
+    });
 }
 
 void WebRTCClient::setStateCallback(StateCallback callback) {
@@ -334,10 +432,23 @@ WebRTCClient::ConnectionState WebRTCClient::getState() const {
 }
 
 void WebRTCClient::setServerUrl(const std::string& url) {
+    if (pImpl->pipeline || pImpl->webrtcbin) {
+        pImpl->emitError("Cannot change server URL while running");
+        return;
+    }
     pImpl->server_url = url;
+    if (pImpl->transport) {
+        pImpl->transport->setServerUrl(url);
+    } else {
+        pImpl->transport = std::make_unique<HttpSignalingTransport>(url);
+    }
 }
 
 void WebRTCClient::setCameraConfig(const CameraConfig& config) {
+    if (pImpl->pipeline || pImpl->webrtcbin) {
+        pImpl->emitError("Cannot change camera config while running");
+        return;
+    }
     pImpl->camera_config = config;
 }
 
@@ -372,6 +483,9 @@ void WebRTCClient::Impl::flushPendingIce() {
 }
 
 void WebRTCClient::Impl::sendIceCandidate(guint mlineindex, const gchar *candidate) {
+    if (shutting_down) {
+        return;
+    }
     if (!remote_desc_set) {
         queueIce(mlineindex, candidate);
         return;
@@ -390,69 +504,17 @@ void WebRTCClient::Impl::sendIceCandidate(guint mlineindex, const gchar *candida
         return;  // TCP candidate 무시
     }
 
-    JsonBuilder *builder = json_builder_new();
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "candidate");
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "candidate");
-    json_builder_add_string_value(builder, candidate);
-    json_builder_set_member_name(builder, "sdpMid");
-    json_builder_add_string_value(builder, sdp_mid);
-    json_builder_set_member_name(builder, "sdpMLineIndex");
-    json_builder_add_int_value(builder, static_cast<int>(mlineindex));
-    json_builder_end_object(builder);
-    json_builder_set_member_name(builder, "webrtc_id");
-    json_builder_add_string_value(builder, webrtc_id);
-    json_builder_end_object(builder);
-
-    JsonNode *root = json_builder_get_root(builder);
-    JsonNode *response = postJson("/webrtc/ice", root);
-    if (response) {
-        json_node_free(response);
+    if (!transport) {
+        emitError("Signaling transport not initialized");
+        return;
     }
-    json_node_free(root);
-    g_object_unref(builder);
-}
 
-JsonNode *WebRTCClient::Impl::postJson(const gchar *path, JsonNode *payload) {
-    gchar *url = g_strdup_printf("%s%s", server_url.c_str(), path);
-    SoupMessage *msg = soup_message_new("POST", url);
-    g_free(url);
-
-    JsonGenerator *gen = json_generator_new();
-    json_generator_set_root(gen, payload);
-    gchar *body = json_generator_to_data(gen, nullptr);
-    g_object_unref(gen);
-
-    GBytes *request_body = g_bytes_new_take(body, std::strlen(body));
-    soup_message_set_request_body_from_bytes(msg, "application/json", request_body);
-    g_bytes_unref(request_body);
-
-    GError *error = nullptr;
-    GBytes *response = soup_session_send_and_read(soup, msg, nullptr, &error);
-    if (!response) {
-        if (error) {
-            g_error_free(error);
+    std::string error_msg;
+    if (!transport->sendIce(candidate, sdp_mid, static_cast<int>(mlineindex), webrtc_id, &error_msg)) {
+        if (!error_msg.empty()) {
+            emitError(error_msg);
         }
-        g_object_unref(msg);
-        return nullptr;
     }
-
-    JsonParser *parser = json_parser_new();
-    gsize resp_len = 0;
-    const gchar *resp_body = static_cast<const gchar *>(g_bytes_get_data(response, &resp_len));
-    if (!json_parser_load_from_data(parser, resp_body, resp_len, nullptr)) {
-        g_object_unref(parser);
-        g_bytes_unref(response);
-        g_object_unref(msg);
-        return nullptr;
-    }
-
-    JsonNode *root = json_node_copy(json_parser_get_root(parser));
-    g_object_unref(parser);
-    g_bytes_unref(response);
-    g_object_unref(msg);
-    return root;
 }
 
 void WebRTCClient::Impl::forceSetupActive(GstSDPMessage *sdp) {
@@ -478,11 +540,18 @@ void WebRTCClient::Impl::forceSetupActive(GstSDPMessage *sdp) {
 }
 
 void WebRTCClient::Impl::handleNegotiationNeeded(GstElement *webrtcbin) {
+    if (shutting_down) {
+        return;
+    }
     GstPromise *promise = gst_promise_new_with_change_func(on_offer_created_static, this, nullptr);
     g_signal_emit_by_name(webrtcbin, "create-offer", nullptr, promise);
 }
 
 void WebRTCClient::Impl::handleOfferCreated(GstPromise *promise) {
+    if (shutting_down) {
+        gst_promise_unref(promise);
+        return;
+    }
     const GstStructure *reply = gst_promise_get_reply(promise);
     GstWebRTCSessionDescription *offer = nullptr;
     gst_structure_get(reply, "offer", GST_TYPE_WEBRTC_SESSION_DESCRIPTION, &offer, nullptr);
@@ -514,52 +583,41 @@ void WebRTCClient::Impl::handleOfferCreated(GstPromise *promise) {
 
     // 서버로 offer 전송
     gchar *sdp_str = gst_sdp_message_as_text(offer->sdp);
-
-    JsonBuilder *builder = json_builder_new();
-    json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "sdp");
-    json_builder_add_string_value(builder, sdp_str);
-    json_builder_set_member_name(builder, "type");
-    json_builder_add_string_value(builder, "offer");
-    json_builder_set_member_name(builder, "webrtc_id");
-    json_builder_add_string_value(builder, webrtc_id);
-    json_builder_end_object(builder);
-
-    JsonNode *root = json_builder_get_root(builder);
-    JsonNode *response = postJson("/webrtc/offer", root);
-
-    if (response) {
-        JsonObject *obj = json_node_get_object(response);
-        const gchar *answer_sdp = json_object_get_string_member(obj, "sdp");
-        const gchar *answer_type = json_object_get_string_member(obj, "type");
-
-        if (answer_sdp && answer_type && g_strcmp0(answer_type, "answer") == 0) {
-            GstSDPMessage *sdp = nullptr;
-            gst_sdp_message_new(&sdp);
-            gst_sdp_message_parse_buffer(reinterpret_cast<const guint8 *>(answer_sdp), 
-                                         std::strlen(answer_sdp), sdp);
-            GstWebRTCSessionDescription *answer =
-                gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
-
-            GstPromise *remote_promise = gst_promise_new();
-            g_signal_emit_by_name(webrtcbin, "set-remote-description", answer, remote_promise);
-            gst_promise_interrupt(remote_promise);
-            gst_promise_unref(remote_promise);
-            gst_webrtc_session_description_free(answer);
-
-            remote_desc_set = true;
-            flushPendingIce();
-            setState(ConnectionState::CONNECTED);
-        } else {
-            reportError("Invalid answer from server");
-        }
-        json_node_free(response);
-    } else {
-        reportError("Failed to get answer from server");
+    if (!transport) {
+        reportError("Signaling transport not initialized");
+        g_free(sdp_str);
+        gst_webrtc_session_description_free(offer);
+        return;
     }
 
-    json_node_free(root);
-    g_object_unref(builder);
+    std::string answer_sdp;
+    std::string error_msg;
+
+    //json으로 변환하여 서버로 offer로 전송과 동시에 asnwer을 받아오는 역할의 API
+    if (!transport->sendOffer(sdp_str, webrtc_id, &answer_sdp, &error_msg)) {
+        reportError(error_msg.empty() ? "Failed to get answer from server" : error_msg);
+        g_free(sdp_str);
+        gst_webrtc_session_description_free(offer);
+        return;
+    }
+
+    GstSDPMessage *sdp = nullptr;
+    gst_sdp_message_new(&sdp);
+    gst_sdp_message_parse_buffer(reinterpret_cast<const guint8 *>(answer_sdp.c_str()),
+                                 answer_sdp.size(), sdp);
+    GstWebRTCSessionDescription *answer =
+        gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp);
+
+    GstPromise *remote_promise = gst_promise_new();
+    g_signal_emit_by_name(webrtcbin, "set-remote-description", answer, remote_promise);
+    gst_promise_interrupt(remote_promise);
+    gst_promise_unref(remote_promise);
+    gst_webrtc_session_description_free(answer);
+
+    remote_desc_set = true;
+    flushPendingIce();
+    setState(ConnectionState::CONNECTED);
+
     g_free(sdp_str);
     gst_webrtc_session_description_free(offer);
 }
@@ -567,6 +625,9 @@ void WebRTCClient::Impl::handleOfferCreated(GstPromise *promise) {
 void WebRTCClient::Impl::handleIceCandidate(GstElement *webrtcbin, guint mlineindex, 
                                              gchar *candidate) {
     (void)webrtcbin;
+    if (shutting_down) {
+        return;
+    }
     if (candidate && *candidate) {
         sendIceCandidate(mlineindex, candidate);
     }
@@ -574,6 +635,9 @@ void WebRTCClient::Impl::handleIceCandidate(GstElement *webrtcbin, guint mlinein
 
 gboolean WebRTCClient::Impl::handleBusMessage(GstBus *bus, GstMessage *msg) {
     (void)bus;
+    if (shutting_down) {
+        return TRUE;
+    }
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_ERROR: {
             GError *err = nullptr;
@@ -606,6 +670,9 @@ gboolean WebRTCClient::Impl::handleBusMessage(GstBus *bus, GstMessage *msg) {
 }
 
 void WebRTCClient::Impl::handleIncomingStream(GstElement *webrtc, GstPad *pad) {
+    if (shutting_down) {
+        return;
+    }
     if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC) {
         return;
     }
@@ -629,6 +696,9 @@ void WebRTCClient::Impl::handleIncomingStream(GstElement *webrtc, GstPad *pad) {
 }
 
 void WebRTCClient::Impl::handleDecodebinStream(GstPad *pad) {
+    if (shutting_down) {
+        return;
+    }
     if (!gst_pad_has_current_caps(pad)) {
         return;
     }
@@ -646,6 +716,9 @@ void WebRTCClient::Impl::handleDecodebinStream(GstPad *pad) {
 }
 
 void WebRTCClient::Impl::handleMediaStream(GstPad *pad, const char *convert_name) {
+    if (shutting_down) {
+        return;
+    }
     GstElement *q = gst_element_factory_make("queue", nullptr);
     GstElement *conv = gst_element_factory_make(convert_name, nullptr);
     GstElement *sink = gst_element_factory_make("fakesink", nullptr);
@@ -669,6 +742,9 @@ void WebRTCClient::Impl::handleMediaStream(GstPad *pad, const char *convert_name
 }
 
 void WebRTCClient::Impl::handleWebRTCStateChanged(GObject *obj) {
+    if (shutting_down) {
+        return;
+    }
     GstWebRTCICEConnectionState ice_conn_state;
     g_object_get(obj, "ice-connection-state", &ice_conn_state, nullptr);
 
@@ -676,8 +752,13 @@ void WebRTCClient::Impl::handleWebRTCStateChanged(GObject *obj) {
         ice_conn_state == GST_WEBRTC_ICE_CONNECTION_STATE_COMPLETED) {
         setState(ConnectionState::CONNECTED);
     } else if (ice_conn_state == GST_WEBRTC_ICE_CONNECTION_STATE_FAILED) {
-        setState(ConnectionState::FAILED);
         reportError("ICE connection failed");
     }
 }
 
+void WebRTCClient::Impl::runLoop() {
+    loop_running = true;
+    g_main_loop_run(loop);
+    loop_running = false;
+    cleanupPipeline();
+}
