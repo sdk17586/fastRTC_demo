@@ -1,0 +1,21 @@
+# 빌드 결과물
+bin/
+*.o
+*.so
+*.a
+
+# 실행 파일 (이전 위치)
+client
+simple_client
+
+# 컴파일 임시 파일
+*.d
+*.dylib
+*.exe
+
+# 편집기 임시 파일
+*~
+*.swp
+*.swo
+.DS_Store
+
