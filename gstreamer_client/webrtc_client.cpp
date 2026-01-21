@@ -199,7 +199,6 @@ public:
     }
   }
 
-  // 정적 콜백 함수들 - Impl 포인터를 전달받아 인스턴스 메서드 호출
   static void on_negotiation_needed(GstElement *webrtcbin, gpointer user_data) {
     Impl *self = static_cast<Impl *>(user_data);
     self->handleNegotiationNeeded(webrtcbin);
@@ -264,6 +263,7 @@ public:
     void flushPendingIce();
     void sendIceCandidate(guint mlineindex, const gchar *candidate);
     void forceSetupActive(GstSDPMessage *sdp);
+    void setupTxProbes();
     void logSection(const char *title) const;
     void logLine(const std::string& line) const;
     void logSdp(const char *label, const std::string& type,
@@ -369,31 +369,8 @@ bool WebRTCClient::start() {
     return false;
   }
 
-  GstElement *pay = gst_bin_get_by_name(GST_BIN(pImpl->pipeline), "pay");
-  if (pay) {
-    GstPad *srcpad = gst_element_get_static_pad(pay, "src");
-    if (srcpad) {
-      gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_BUFFER, Impl::on_tx_probe,
-                        pImpl.get(), nullptr);
-      pImpl->logLine("[client] 송신 로그: pay src pad probe 연결됨");
-      gst_object_unref(srcpad);
-    } else {
-      pImpl->logLine("[client] 송신 로그: pay src pad 없음");
-    }
-    gst_object_unref(pay);
-  } else {
-    pImpl->logLine("[client] 송신 로그: pay 요소를 찾지 못함");
-  }
-
-  GstPad *webrtc_sink = gst_element_get_static_pad(pImpl->webrtcbin, "sink_0");
-  if (webrtc_sink) {
-    gst_pad_add_probe(webrtc_sink, GST_PAD_PROBE_TYPE_BUFFER, Impl::on_tx_probe,
-                      pImpl.get(), nullptr);
-    pImpl->logLine("[client] 송신 로그: webrtcbin sink_0 pad probe 연결됨");
-    gst_object_unref(webrtc_sink);
-  } else {
-    pImpl->logLine("[client] 송신 로그: webrtcbin sink_0 pad 없음");
-  }
+  // RTP 패킷 송신 모니터링 프로브
+  pImpl->setupTxProbes();
 
   g_object_set(pImpl->webrtcbin, "stun-server", STUN_SERVER, "bundle-policy",
                GST_WEBRTC_BUNDLE_POLICY_MAX_BUNDLE, nullptr);
@@ -638,7 +615,6 @@ void WebRTCClient::Impl::handleOfferCreated(GstPromise *promise) {
   gst_promise_interrupt(set_promise);
   gst_promise_unref(set_promise);
 
-  // 서버로 offer 전송
   gchar *sdp_str = gst_sdp_message_as_text(offer->sdp);
   logSdp("OFFER 송신 (클라이언트 -> 서버)", "offer", sdp_str ? sdp_str : "");
   if (!transport) {
@@ -914,6 +890,36 @@ void WebRTCClient::Impl::logSdp(const char *label, const std::string &type,
           " bytes");
   logLine("[client] Full SDP:");
   logLine(sdp);
+}
+
+void WebRTCClient::Impl::setupTxProbes() {
+  // pay 요소의 source pad에 프로브 설치
+  GstElement *pay = gst_bin_get_by_name(GST_BIN(pipeline), "pay");
+  if (pay) {
+    GstPad *srcpad = gst_element_get_static_pad(pay, "src");
+    if (srcpad) {
+      gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_BUFFER, Impl::on_tx_probe,
+                        this, nullptr);
+      logLine("[client] 송신 로그: pay src pad probe 연결됨");
+      gst_object_unref(srcpad);
+    } else {
+      logLine("[client] 송신 로그: pay src pad 없음");
+    }
+    gst_object_unref(pay);
+  } else {
+    logLine("[client] 송신 로그: pay 요소를 찾지 못함");
+  }
+
+  // webrtcbin의 sink_0 pad에 프로브 설치
+  GstPad *webrtc_sink = gst_element_get_static_pad(webrtcbin, "sink_0");
+  if (webrtc_sink) {
+    gst_pad_add_probe(webrtc_sink, GST_PAD_PROBE_TYPE_BUFFER, Impl::on_tx_probe,
+                      this, nullptr);
+    logLine("[client] 송신 로그: webrtcbin sink_0 pad probe 연결됨");
+    gst_object_unref(webrtc_sink);
+  } else {
+    logLine("[client] 송신 로그: webrtcbin sink_0 pad 없음");
+  }
 }
 
 void WebRTCClient::Impl::logIce(const char *direction, const gchar *sdp_mid,
