@@ -46,6 +46,38 @@ JsonNode *post_json(SoupSession *soup, const std::string& server_url, const char
     g_object_unref(msg);
     return root;
 }
+
+JsonNode *get_json(SoupSession *soup, const std::string& server_url, const char *path) {
+    gchar *url = g_strdup_printf("%s%s", server_url.c_str(), path);
+    SoupMessage *msg = soup_message_new("GET", url);
+    g_free(url);
+
+    GError *error = nullptr;
+    GBytes *response = soup_session_send_and_read(soup, msg, nullptr, &error);
+    if (!response) {
+        if (error) {
+            g_error_free(error);
+        }
+        g_object_unref(msg);
+        return nullptr;
+    }
+
+    JsonParser *parser = json_parser_new();
+    gsize resp_len = 0;
+    const gchar *resp_body = static_cast<const gchar *>(g_bytes_get_data(response, &resp_len));
+    if (!json_parser_load_from_data(parser, resp_body, resp_len, nullptr)) {
+        g_object_unref(parser);
+        g_bytes_unref(response);
+        g_object_unref(msg);
+        return nullptr;
+    }
+
+    JsonNode *root = json_node_copy(json_parser_get_root(parser));
+    g_object_unref(parser);
+    g_bytes_unref(response);
+    g_object_unref(msg);
+    return root;
+}
 }  // namespace
 
 HttpSignalingTransport::HttpSignalingTransport(const std::string& url)
@@ -141,5 +173,64 @@ bool HttpSignalingTransport::sendIce(const std::string& candidate,
 
     json_node_free(root);
     g_object_unref(builder);
+    return ok;
+}
+
+bool HttpSignalingTransport::pollIce(const std::string& webrtc_id,
+                                     std::vector<IceCandidate>* candidates,
+                                     bool* complete,
+                                     std::string* error) {
+    if (candidates) {
+        candidates->clear();
+    }
+    if (complete) {
+        *complete = false;
+    }
+
+    gchar *path = g_strdup_printf("/webrtc/ice?webrtc_id=%s", webrtc_id.c_str());
+    JsonNode *response = get_json(soup, server_url, path);
+    g_free(path);
+
+    if (!response) {
+        if (error) {
+            *error = "Failed to poll ICE candidates";
+        }
+        return false;
+    }
+
+    bool ok = true;
+    JsonObject *obj = json_node_get_object(response);
+    if (complete && json_object_has_member(obj, "complete")) {
+        *complete = json_object_get_boolean_member(obj, "complete");
+    }
+
+    if (candidates && json_object_has_member(obj, "candidates")) {
+        JsonArray *arr = json_object_get_array_member(obj, "candidates");
+        guint len = json_array_get_length(arr);
+        for (guint i = 0; i < len; ++i) {
+            JsonObject *cand = json_array_get_object_element(arr, i);
+            if (!cand) {
+                continue;
+            }
+            const gchar *candidate = json_object_get_string_member(cand, "candidate");
+            const gchar *sdp_mid = nullptr;
+            if (json_object_has_member(cand, "sdpMid")) {
+                sdp_mid = json_object_get_string_member(cand, "sdpMid");
+            }
+            gint mlineindex = 0;
+            if (json_object_has_member(cand, "sdpMLineIndex")) {
+                mlineindex = json_object_get_int_member(cand, "sdpMLineIndex");
+            }
+            if (candidate && *candidate) {
+                IceCandidate out;
+                out.candidate = candidate;
+                out.sdp_mid = sdp_mid ? sdp_mid : "";
+                out.mlineindex = mlineindex;
+                candidates->push_back(out);
+            }
+        }
+    }
+
+    json_node_free(response);
     return ok;
 }

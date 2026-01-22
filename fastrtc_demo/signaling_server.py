@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -14,6 +14,117 @@ from webrtc_service import WebRTCService
 class SignalingServer:
     def __init__(self, webrtc: WebRTCService) -> None:
         self.webrtc = webrtc
+        self._ice_queues: dict[str, asyncio.Queue[dict]] = {}
+        self._ice_complete: set[str] = set()
+        self._ice_handlers: set[str] = set()
+        self._ice_seen: dict[str, set[str]] = {}
+
+    def _register_pc_ice_handler(self, webrtc_id: str, pc) -> None:
+        if webrtc_id in self._ice_handlers:
+            return
+        self._ice_handlers.add(webrtc_id)
+        self._ice_queues.setdefault(webrtc_id, asyncio.Queue())
+        self._ice_seen.setdefault(webrtc_id, set())
+
+        def mark_complete() -> None:
+            if webrtc_id in self._ice_complete:
+                return
+            self._ice_complete.add(webrtc_id)
+            asyncio.create_task(
+                self._ice_queues[webrtc_id].put({"type": "ice-complete"})
+            )
+
+        def queue_candidate(candidate_str: str, sdp_mid: str, sdp_mline_index: int) -> None:
+            key = f"{sdp_mline_index}:{candidate_str}"
+            if key in self._ice_seen[webrtc_id]:
+                return
+            self._ice_seen[webrtc_id].add(key)
+            print("\n========================================")
+            print("📤 ICE CANDIDATE 송신 (서버 -> 클라이언트)")
+            print("========================================\n")
+            print("[server] Sending ICE candidate to client")
+            print(f"[server] WebRTC ID: {webrtc_id}")
+            print(f"[server] SDP MID: {sdp_mid}")
+            print(f"[server] SDP MLine Index: {sdp_mline_index}")
+            print(f"[server] Candidate String: {candidate_str}")
+            print("[server] ICE Candidate Details:")
+            self._parse_ice_candidate_details(candidate_str)
+            asyncio.create_task(
+                self._ice_queues[webrtc_id].put(
+                    {
+                        "type": "ice-candidate",
+                        "candidate": {
+                            "candidate": candidate_str,
+                            "sdpMid": sdp_mid,
+                            "sdpMLineIndex": sdp_mline_index,
+                        },
+                    }
+                )
+            )
+
+        @pc.on("icecandidate")
+        def on_icecandidate(candidate) -> None:
+            if candidate is None:
+                mark_complete()
+                return
+            sdp_mid = getattr(candidate, "sdpMid", "") or ""
+            sdp_mline_index = getattr(candidate, "sdpMLineIndex", 0) or 0
+            candidate_str = getattr(candidate, "candidate", "") or ""
+            if candidate_str:
+                queue_candidate(candidate_str, sdp_mid, int(sdp_mline_index))
+
+        @pc.on("iceconnectionstatechange")
+        def on_iceconnectionstatechange() -> None:
+            if pc.iceConnectionState in ("connected", "completed"):
+                mark_complete()
+
+        local_desc = pc.localDescription
+        if local_desc and local_desc.sdp:
+            self._seed_ice_from_sdp(webrtc_id, local_desc.sdp, queue_candidate)
+
+    def _drain_ice_queue(self, webrtc_id: str) -> tuple[list[dict], bool]:
+        queue = self._ice_queues.get(webrtc_id)
+        if not queue:
+            return [], webrtc_id in self._ice_complete
+        drained: list[dict] = []
+        while True:
+            try:
+                drained.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        complete = webrtc_id in self._ice_complete or any(
+            item.get("type") == "ice-complete" for item in drained
+        )
+        return drained, complete
+
+    def _seed_ice_from_sdp(
+        self,
+        webrtc_id: str,
+        sdp: str,
+        queue_candidate: Callable[[str, str, int], None],
+    ) -> None:
+        if not sdp:
+            return
+        mline_index = -1
+        current_mid = ""
+        for raw_line in sdp.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("m="):
+                mline_index += 1
+                current_mid = ""
+                continue
+            if line.startswith("a=mid:"):
+                current_mid = line[6:]
+                continue
+            if line.startswith("a=candidate:"):
+                candidate_str = line[2:]
+                queue_candidate(
+                    candidate_str,
+                    current_mid or "0",
+                    mline_index if mline_index >= 0 else 0,
+                )
 
     async def handle_webrtc_ice(self, request: Request):
         body = await request.json()
@@ -89,9 +200,9 @@ class SignalingServer:
 
         pc = self.webrtc.stream.pcs.get(webrtc_id)
         if pc:
-            await self.webrtc.wait_for_ice_complete(pc)
+            self._register_pc_ice_handler(webrtc_id, pc)
             result = {
-                "sdp": pc.localDescription.sdp,
+                "sdp": self._strip_ice_from_sdp(pc.localDescription.sdp),
                 "type": pc.localDescription.type,
             }
 
@@ -121,6 +232,18 @@ class SignalingServer:
 
         return result
 
+    async def handle_webrtc_ice_poll(self, request: Request):
+        webrtc_id = request.query_params.get("webrtc_id")
+        if not webrtc_id:
+            return {"status": "failed", "meta": {"error": "missing_webrtc_id"}}
+        drained, complete = self._drain_ice_queue(webrtc_id)
+        candidates = [
+            item["candidate"]
+            for item in drained
+            if item.get("type") == "ice-candidate"
+        ]
+        return {"status": "ok", "candidates": candidates, "complete": complete}
+
     def handle_root(self) -> dict[str, str]:
         return {
             "status": "running",
@@ -138,6 +261,7 @@ class SignalingServer:
     def _register_routes(self, app: FastAPI) -> None:
         app.post("/webrtc/offer")(self.handle_webrtc_offer)
         app.post("/webrtc/ice")(self.handle_webrtc_ice)
+        app.get("/webrtc/ice")(self.handle_webrtc_ice_poll)
         app.get("/")(self.handle_root)
         app.get("/video")(self.handle_video_feed)
 
@@ -280,6 +404,17 @@ class SignalingServer:
                     current_media = media_type
 
         print(f"--- End of {title} SDP Details ---\n")
+
+    def _strip_ice_from_sdp(self, sdp_text: str) -> str:
+        if not sdp_text:
+            return sdp_text
+        lines = []
+        for raw_line in sdp_text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("a=candidate:") or line.startswith("a=end-of-candidates"):
+                continue
+            lines.append(raw_line)
+        return "\n".join(lines)
 
     def create_app(self) -> FastAPI:
         @asynccontextmanager

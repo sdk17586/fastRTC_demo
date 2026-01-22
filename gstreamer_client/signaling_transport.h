@@ -1,8 +1,15 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 typedef struct _SoupSession SoupSession;
+
+struct IceCandidate {
+    std::string candidate;
+    std::string sdp_mid;
+    int mlineindex = 0;
+};
 
 class ISignalingTransport {
 public:
@@ -16,6 +23,10 @@ public:
                          const std::string& sdp_mid,
                          int mlineindex,
                          const std::string& webrtc_id,
+                         std::string* error) = 0;
+    virtual bool pollIce(const std::string& webrtc_id,
+                         std::vector<IceCandidate>* candidates,
+                         bool* complete,
                          std::string* error) = 0;
 };
 
@@ -33,6 +44,10 @@ public:
                  const std::string& sdp_mid,
                  int mlineindex,
                  const std::string& webrtc_id,
+                 std::string* error) override;
+    bool pollIce(const std::string& webrtc_id,
+                 std::vector<IceCandidate>* candidates,
+                 bool* complete,
                  std::string* error) override;
 
 private:

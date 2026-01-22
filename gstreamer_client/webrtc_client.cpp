@@ -13,6 +13,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #define STUN_SERVER "stun://stun.l.google.com:19302"
 
@@ -52,6 +53,8 @@ public:
   std::atomic<bool> shutting_down{false};
   std::thread loop_thread;
   std::mutex cleanup_mutex;
+  bool ice_polling_started = false;
+  guint ice_poll_source_id = 0;
 
   std::unique_ptr<ISignalingTransport> transport;
   guint64 tx_last_log_us = 0;
@@ -95,6 +98,11 @@ public:
     if (bus_watch_id != 0) {
       g_source_remove(bus_watch_id);
       bus_watch_id = 0;
+    }
+    if (ice_poll_source_id != 0) {
+      g_source_remove(ice_poll_source_id);
+      ice_poll_source_id = 0;
+      ice_polling_started = false;
     }
 
     if (loop) {
@@ -140,6 +148,7 @@ public:
   void resetSessionState() {
     shutting_down = false;
     remote_desc_set = false;
+    ice_polling_started = false;
     if (webrtc_id) {
       g_free(webrtc_id);
     }
@@ -154,6 +163,10 @@ public:
         g_free(p->candidate);
         g_free(p);
       }
+    }
+    if (ice_poll_source_id != 0) {
+      g_source_remove(ice_poll_source_id);
+      ice_poll_source_id = 0;
     }
   }
 
@@ -243,6 +256,10 @@ public:
     Impl *self = static_cast<Impl *>(user_data);
     return self->handleTxProbe(pad, info);
   }
+  static gboolean poll_remote_ice_cb(gpointer user_data) {
+    Impl *self = static_cast<Impl *>(user_data);
+    return self->handlePollRemoteIce();
+  }
 
   // 인스턴스 메서드들
   void handleNegotiationNeeded(GstElement *webrtcbin);
@@ -255,21 +272,23 @@ public:
   void handleMediaStream(GstPad *pad, const char *convert_name);
   void handleWebRTCStateChanged(GObject *obj);
   GstPadProbeReturn handleTxProbe(GstPad *pad, GstPadProbeInfo *info);
+  gboolean handlePollRemoteIce();
   void runLoop();
 
   // 헬퍼 메서드들
   bool ensureElementAvailable(const gchar *name);
   void queueIce(guint mlineindex, const gchar *candidate);
-    void flushPendingIce();
-    void sendIceCandidate(guint mlineindex, const gchar *candidate);
-    void forceSetupActive(GstSDPMessage *sdp);
-    void setupTxProbes();
-    void logSection(const char *title) const;
-    void logLine(const std::string& line) const;
-    void logSdp(const char *label, const std::string& type,
-                const std::string& sdp) const;
-    void logIce(const char *direction, const gchar *sdp_mid, guint mlineindex,
-                const gchar *candidate, bool queued) const;
+  void flushPendingIce();
+  void sendIceCandidate(guint mlineindex, const gchar *candidate);
+  void forceSetupActive(GstSDPMessage *sdp);
+  void setupTxProbes();
+  void logSection(const char *title) const;
+  void logLine(const std::string &line) const;
+  void logSdp(const char *label, const std::string &type,
+              const std::string &sdp) const;
+  void logIce(const char *direction, const gchar *sdp_mid, guint mlineindex,
+              const gchar *candidate, bool queued) const;
+  void logRemoteIce(const IceCandidate &cand) const;
 };
 
 // WebRTCClient 구현
@@ -654,6 +673,10 @@ void WebRTCClient::Impl::handleOfferCreated(GstPromise *promise) {
 
   remote_desc_set = true;
   flushPendingIce();
+  if (!ice_polling_started) {
+    ice_polling_started = true;
+    ice_poll_source_id = g_timeout_add(200, Impl::poll_remote_ice_cb, this);
+  }
   setState(ConnectionState::CONNECTED);
 
   g_free(sdp_str);
@@ -871,6 +894,41 @@ GstPadProbeReturn WebRTCClient::Impl::handleTxProbe(GstPad *pad,
   return GST_PAD_PROBE_OK;
 }
 
+gboolean WebRTCClient::Impl::handlePollRemoteIce() {
+  if (shutting_down) {
+    return FALSE;
+  }
+  if (!remote_desc_set || !transport || !webrtcbin) {
+    return TRUE;
+  }
+
+  std::vector<IceCandidate> candidates;
+  bool complete = false;
+  std::string error_msg;
+  if (!transport->pollIce(webrtc_id ? webrtc_id : "", &candidates, &complete,
+                          &error_msg)) {
+    if (!error_msg.empty()) {
+      emitError(error_msg);
+    }
+    return TRUE;
+  }
+
+  for (const auto &cand : candidates) {
+    logRemoteIce(cand);
+    g_signal_emit_by_name(webrtcbin, "add-ice-candidate", cand.mlineindex,
+                          cand.candidate.c_str());
+  }
+
+  if (complete) {
+    logLine("[client] ICE polling complete");
+    ice_poll_source_id = 0;
+    ice_polling_started = false;
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 void WebRTCClient::Impl::logSection(const char *title) const {
   std::cout << "\n========================================\n";
   std::cout << title << "\n";
@@ -933,6 +991,16 @@ void WebRTCClient::Impl::logIce(const char *direction, const gchar *sdp_mid,
           std::to_string(mlineindex));
   logLine(std::string("[client] Candidate: ") + (candidate ? candidate : ""));
   logLine(std::string("[client] Queued: ") + (queued ? "yes" : "no"));
+}
+
+void WebRTCClient::Impl::logRemoteIce(const IceCandidate &cand) const {
+  logSection("ICE CANDIDATE 수신 (서버 -> 클라이언트)");
+  logLine(std::string("[client] WebRTC ID: ") + (webrtc_id ? webrtc_id : ""));
+  logLine(std::string("[client] SDP MID: ") +
+          (cand.sdp_mid.empty() ? "(none)" : cand.sdp_mid));
+  logLine(std::string("[client] SDP MLine Index: ") +
+          std::to_string(cand.mlineindex));
+  logLine(std::string("[client] Candidate: ") + cand.candidate);
 }
 
 void WebRTCClient::Impl::runLoop() {
