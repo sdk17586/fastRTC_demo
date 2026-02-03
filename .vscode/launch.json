@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": false,
-      "cwd": "/root/fastrtc/gstreamer_client",
-      "program": "/root/fastrtc/gstreamer_client/build/Debug/outDebug",
+      "cwd": "/root/fastrtc/webrtc_peer",
+      "program": "/root/fastrtc/webrtc_peer/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

@@ -1,8 +1,7 @@
 [
   {
-    "directory": "/root/fastrtc/gstreamer_client",
+    "directory": "/root/fastrtc/webrtc_peer",
     "command": "g++ -O2 -Wall -Wextra -std=c++17 -DGST_USE_UNSTABLE_API -I/usr/include/gstreamer-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/sysprof-6 -I/usr/include/orc-0.4 -I/usr/include/libmount -I/usr/include/blkid -I/usr/include/libsoup-3.0 -isystem /usr/include/mit-krb5 -I/usr/include/json-glib-1.0 -pthread -c client.cpp",
-    "file": "/root/fastrtc/gstreamer_client/client.cpp"
+    "file": "/root/fastrtc/webrtc_peer/client.cpp"
   }
 ]
-

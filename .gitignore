@@ -33,7 +33,7 @@ dist/
 cmake-build-*/
 
 # Project build outputs
-gstreamer_client/bin/
+webrtc_peer/bin/
 turn/turn_peer/bin/
 turn/turn_sfu/bin/
 **/bin/
