@@ -34,7 +34,8 @@ cmake-build-*/
 
 # Project build outputs
 gstreamer_client/bin/
-trun/turn_peer/bin/
+turn/turn_peer/bin/
+turn/turn_sfu/bin/
 **/bin/
 
 # Logs and runtime files
